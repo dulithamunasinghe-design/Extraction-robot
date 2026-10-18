@@ -551,6 +551,19 @@ void runLineFollow()
   bool left   = (digitalRead(IR_SENSOR_LEFT)   == LINE_COLOR);
   unsigned long now = millis();
 
+  // --- NEW: check lower ultrasonic for a cube at grab distance while on the line ---
+  float belowUS, aboveUS;
+  readBoth(belowUS, aboveUS);
+  // If the BELOW sensor reads at or within grab distance and the ABOVE sensor reports a different value
+  // (i.e. the ABOVE reading is sufficiently farther), assume this is the cube near the line and close the claw.
+  if (belowUS > 0 && belowUS <= CUBE_GRAB_CM && (aboveUS - belowUS) > CUBE_ABOVE_GAP_CM)
+  {
+    rotateMotor(0, 0);
+    myServo.write(SERVO_CLOSED_ANGLE);
+    delay(GRIP_SETTLE_MS);
+    // after closing, continue; the next loop iteration will handle driving with the cube
+  }
+
   // Detect transition from WBW (middle only) to WBB (middle+right) => turn right
   // or to BBW (left+middle) => turn left. We use the snapshot from the previous call.
   if (prevLeftSensor == 0 && prevMiddleSensor == 1 && prevRightSensor == 0)
