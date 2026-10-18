@@ -137,6 +137,11 @@ bool lost = false;
 bool pivoting = false;
 unsigned long lostSince = 0;
 
+// Add previous sensor snapshot so we can detect WBW->WBB and WBW->BBW transitions
+int prevLeftSensor = 0;
+int prevMiddleSensor = 0;
+int prevRightSensor = 0;
+
 // =====================================================================
 //  SETUP: initialise everything
 // =====================================================================
@@ -531,6 +536,11 @@ void startLineFollow()
   lost = false;
   pivoting = false;
   lostSince = 0;
+
+  // reset previous sensor snapshot
+  prevLeftSensor = 0;
+  prevMiddleSensor = 0;
+  prevRightSensor = 0;
 }
 
 // One step of line following. Called repeatedly from loop().
@@ -540,6 +550,30 @@ void runLineFollow()
   bool middle = (digitalRead(IR_SENSOR_MIDDLE) == LINE_COLOR);
   bool left   = (digitalRead(IR_SENSOR_LEFT)   == LINE_COLOR);
   unsigned long now = millis();
+
+  // Detect transition from WBW (middle only) to WBB (middle+right) => turn right
+  // or to BBW (left+middle) => turn left. We use the snapshot from the previous call.
+  if (prevLeftSensor == 0 && prevMiddleSensor == 1 && prevRightSensor == 0)
+  {
+    if (!left && middle && right)
+    {
+      // WBW -> WBB: initiate a right turn step and return to let the loop re-evaluate sensors
+      turnStep(+1);
+      prevLeftSensor = left ? 1 : 0;
+      prevMiddleSensor = middle ? 1 : 0;
+      prevRightSensor = right ? 1 : 0;
+      return;
+    }
+    else if (left && middle && !right)
+    {
+      // WBW -> BBW: initiate a left turn step and return to let the loop re-evaluate sensors
+      turnStep(-1);
+      prevLeftSensor = left ? 1 : 0;
+      prevMiddleSensor = middle ? 1 : 0;
+      prevRightSensor = right ? 1 : 0;
+      return;
+    }
+  }
 
   if (left || middle || right)
   {
@@ -609,6 +643,11 @@ void runLineFollow()
       }
     }
   }
+
+  // update previous sensor snapshot for the next step
+  prevLeftSensor = left ? 1 : 0;
+  prevMiddleSensor = middle ? 1 : 0;
+  prevRightSensor = right ? 1 : 0;
 }
 
 // Stop the robot. If the course finished normally, open the claw to release the cube.
