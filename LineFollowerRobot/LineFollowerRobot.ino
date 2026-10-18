@@ -1,17 +1,8 @@
-#define IR_SENSOR_RIGHT 11
-#define IR_SENSOR_LEFT 12
-#define IR_SENSOR_MIDDLE 13
-#define US_SENSOR_ABOVE 3
-#define US_SENSOR_BELOW 2
-#define SERVO 4
-#define MOTOR_SPEED 180
-// Line following from the end of SEP to EXIT only.
-// No pickup, servo or ultrasonic code.
 // Robotics arena sketch, split into separate parts:
 //
 //   PHASE_PICKUP       -> runPickup()      (search for the cube, grab it, drive onto SEP)
 //   PHASE_LINE_FOLLOW  -> runLineFollow()  (line following from the end of SEP to EXIT)
-//   PHASE_DONE         -> motors stopped
+//   PHASE_DONE         -> motors stopped (the claw is opened at the end of the course)
 //
 // All hardware (motors, IR sensors, 2 ultrasonic sensors, servo) is set up once in setup().
 // To test the line following on its own, set START_PHASE to PHASE_LINE_FOLLOW.
@@ -31,7 +22,7 @@
 // IR line sensors
 #define IR_SENSOR_RIGHT   11
 #define IR_SENSOR_LEFT    12
-#define IR_SENSOR_MIDDLE  13     // needs a third sensor wired here
+#define IR_SENSOR_MIDDLE  A2     // analog pins work as normal digital pins
 
 // Ultrasonic sensors (HC-SR04 style: TRIG output, ECHO input)
 #define US_ABOVE_TRIG     3
@@ -54,8 +45,13 @@ int leftMotorPin2   = 10;
 // =====================================================================
 //  SETTINGS
 // =====================================================================
-#define MOTOR_SPEED       180
-#define SOFT_TURN_SPEED   60     // inner wheel speed for gentle steering
+#define MOTOR_SPEED       200
+#define SOFT_TURN_SPEED   65     // inner wheel speed for gentle steering (about 1/3 of MOTOR_SPEED)
+
+// The robot drifts right (uneven weight), so the RIGHT motor runs a little faster everywhere.
+// +10 means the right motor gets 210 when the left gets 200 (all right-motor speeds are scaled by 210/200).
+// Still drifts right -> raise it (try 14). Now drifts left -> lower it (try 6).
+#define RIGHT_MOTOR_TRIM  10
 #define LINE_COLOR        HIGH   // IR output over the black line (flip to LOW if inverted)
 
 // Servo angles (adjust to your gripper)
@@ -63,10 +59,10 @@ int leftMotorPin2   = 10;
 // If the servo buzzes or stalls before the cube is gripped, move CLOSED closer to OPEN.
 #define SERVO_START_ANGLE  90
 #define SERVO_OPEN_ANGLE   90
-#define SERVO_CLOSED_ANGLE 30
+#define SERVO_CLOSED_ANGLE 35
 
 // Line-following timing (measure your robot)
-#define SPEED_CM_PER_S    25     // distance per second at MOTOR_SPEED
+#define SPEED_CM_PER_S    23     // distance per second at MOTOR_SPEED
 #define LOST_TRAVEL_CM    30     // blind distance before deciding the line has ended
 #define SIDE_MEMORY_MS    120    // a side sensor this recent + lost line = corner
 #define PIVOT_MAX_MS      1500   // give up searching for the line after this long
@@ -79,8 +75,8 @@ const unsigned long LOST_STOP_MS = (unsigned long)LOST_TRAVEL_CM * 1000UL / SPEE
 #define CUBE_ABOVE_GAP_CM  10    // ...and the above sensor must read at least this much farther
 #define SAME_OBJECT_CM      8    // |above - below| under this = both sensors see the same obstacle
 #define OBSTACLE_CM        25    // react to an obstacle closer than this
-#define CUBE_GRAB_CM        3    // 1.5 in = 3.81 cm. readDistanceCM() truncates to whole cm,
-                                 // so "<= 3" means the cube is closer than 4 cm
+#define CUBE_GRAB_CM     3.81    // 1.5 in. Readings are float now, so no rounding tricks needed
+#define SENSOR_GAP_MS      50    // pause between the two sensors so they don't hear each other
 
 // Approach
 #define APPROACH_SPEED    140    // PWM while far from the cube
@@ -95,7 +91,7 @@ const unsigned long LOST_STOP_MS = (unsigned long)LOST_TRAVEL_CM * 1000UL / SPEE
 #define TURN_STEP_MS       55    // one scan step (roughly 6 to 12 degrees)
 #define SCAN_SETTLE_MS     50    // let the robot stop before reading
 #define SWEEP_STEPS         6    // scan this many steps left AND right of straight ahead
-#define TURN_90_MS        450    // pivot about 90 degrees at MOTOR_SPEED
+#define TURN_90_MS        405    // pivot about 90 degrees at MOTOR_SPEED (was 450 at 180, scaled; re-measure)
 
 // Where to search (distances estimated from drive time at MOTOR_SPEED)
 #define SEARCH_ZONE_CM    300    // start sweeping after driving this far
@@ -159,13 +155,6 @@ void setup()
   // IR sensors
   pinMode(IR_SENSOR_RIGHT, INPUT);
   pinMode(IR_SENSOR_LEFT, INPUT);
-  pinmode(IR_SENSOR_MIDDLE, INPUT);
-  pinmode(US_SENSOR_ABOVE, INPUT);
-  pinmode(US_SENSOR_BELOW, INPUT);
-  pinmode(SERVO, OUTPUT);
-  
-  rotateMotor(0,0);   
-}
   pinMode(IR_SENSOR_MIDDLE, INPUT);
 
   // Ultrasonic sensors
@@ -191,21 +180,6 @@ void setup()
 // =====================================================================
 void loop()
 {
-  // The Sensors are place so that the Line Just fits between them
-  int rightIRSensorValue = digitalRead(IR_SENSOR_RIGHT);
-  int middle = digitalRead(IR_SENSOR_MIDDLE);
-  int leftIRSensorValue = digitalRead(IR_SENSOR_LEFT);
-
-  int above_ultrasonic_sensor = digitalRead(US_SENSOR_ABOVE);
-  int below_ultrasonic_sensor = digitalRead(US_SENSOR_BELOW);
-
-  //The Sensors are not seeing any black so we are sure the sensors are aligned on either side of the line and so the car is aligned to the line
-  if (rightIRSensorValue == LOW && leftIRSensorValue == LOW)
-  {
-    rotateMotor(MOTOR_SPEED, MOTOR_SPEED);
-  }
-  //Only the Right Sensor Detects black so the car has swerved a bit too much to the left so we must turn right
-  else if (rightIRSensorValue == HIGH && leftIRSensorValue == LOW )
   switch (phase)
   {
     case PHASE_PICKUP:
@@ -241,30 +215,38 @@ void loop()
 //      sees it, then hand over to line following.
 
 // ---------- sensing helpers ----------
-// Median of 3 readings. readDistanceCM() returns 0 when there is no echo,
+// Median of 3 readings. readCM() returns 0 when there is no echo,
 // so 0 is treated as "far away" (999).
-long readClean(int trigPin, int echoPin)
+float readClean(int trigPin, int echoPin)
 {
-  long a = readDistanceCM(trigPin, echoPin); delay(10);
-  long b = readDistanceCM(trigPin, echoPin); delay(10);
-  long c = readDistanceCM(trigPin, echoPin);
-  if (a == 0) a = 999;
-  if (b == 0) b = 999;
-  if (c == 0) c = 999;
-  if (a > b) { long t = a; a = b; b = t; }
-  if (b > c) { long t = b; b = c; c = t; }
-  if (a > b) { long t = a; a = b; b = t; }
+  float a = readCM(trigPin, echoPin); delay(10);
+  float b = readCM(trigPin, echoPin); delay(10);
+  float c = readCM(trigPin, echoPin);
+  if (a <= 0) a = 999;
+  if (b <= 0) b = 999;
+  if (c <= 0) c = 999;
+  if (a > b) { float t = a; a = b; b = t; }
+  if (b > c) { float t = b; b = c; c = t; }
+  if (a > b) { float t = a; a = b; b = t; }
   return b;
 }
 
+// Read both sensors, with a gap between them so they don't hear each other's ping
+void readBoth(float &below, float &above)
+{
+  below = readClean(US_BELOW_TRIG, US_BELOW_ECHO);
+  delay(SENSOR_GAP_MS);
+  above = readClean(US_ABOVE_TRIG, US_ABOVE_ECHO);
+}
+
 // Cube: bottom sensor sees it, top sensor looks over it
-bool isCube(long below, long above)
+bool isCube(float below, float above)
 {
   return below < CUBE_DETECT_CM && (above - below) > CUBE_ABOVE_GAP_CM;
 }
 
 // Obstacle: both sensors see the same thing at about the same distance
-bool isObstacle(long below, long above)
+bool isObstacle(float below, float above)
 {
   return below < OBSTACLE_CM && abs(above - below) < SAME_OBJECT_CM;
 }
@@ -273,11 +255,11 @@ bool isObstacle(long below, long above)
 bool cubeVisible()
 {
   delay(SCAN_SETTLE_MS);
-  long quick = readDistanceCM(US_BELOW_TRIG, US_BELOW_ECHO);
-  if (quick == 0 || quick >= CUBE_DETECT_CM) return false;
+  float quick = readCM(US_BELOW_TRIG, US_BELOW_ECHO);
+  if (quick <= 0 || quick >= CUBE_DETECT_CM) return false;
 
-  long below = readClean(US_BELOW_TRIG, US_BELOW_ECHO);
-  long above = readClean(US_ABOVE_TRIG, US_ABOVE_ECHO);
+  float below, above;
+  readBoth(below, above);
   return isCube(below, above);
 }
 
@@ -398,8 +380,8 @@ bool approachCube()
   bool recentred = false;
   for (int n = 0; n < 80; n++)
   {
-    long below = readClean(US_BELOW_TRIG, US_BELOW_ECHO);
-    long above = readClean(US_ABOVE_TRIG, US_ABOVE_ECHO);
+    float below, above;
+    readBoth(below, above);
 
     if (!isCube(below, above))
     {
@@ -465,8 +447,8 @@ void runPickup()
     unsigned long dt = now - lastMs;
     lastMs = now;
 
-    long below = readClean(US_BELOW_TRIG, US_BELOW_ECHO);
-    long above = readClean(US_ABOVE_TRIG, US_ABOVE_ECHO);
+    float below, above;
+    readBoth(below, above);
 
     // 1) Cube in view: stop and re-check while standing still (the two readings above were
     //    taken a moment apart on the move and can disagree at the edge of the beam), then go get it
@@ -604,7 +586,7 @@ void runLineFollow()
     {
       if (lostFor > PIVOT_MAX_MS)
       {
-        finishCourse();                            // could not find the line again
+        finishCourse(false);                       // could not find the line again: keep the cube
       }
       else if (lastSide > 0)
       {
@@ -619,7 +601,7 @@ void runLineFollow()
     {
       if (lostFor > LOST_STOP_MS)
       {
-        finishCourse();                            // line ended: we are in the EXIT box
+        finishCourse(true);                        // line ended: we are in the EXIT box, release the cube
       }
       else
       {
@@ -629,17 +611,23 @@ void runLineFollow()
   }
 }
 
-void finishCourse()
+// Stop the robot. If the course finished normally, open the claw to release the cube.
+void finishCourse(bool openClaw)
 {
   rotateMotor(0, 0);
+  if (openClaw)
+  {
+    myServo.write(SERVO_OPEN_ANGLE);
+    delay(GRIP_SETTLE_MS);                         // give the servo time to open
+  }
   phase = PHASE_DONE;
 }
 
 // =====================================================================
 //  HELPERS
 // =====================================================================
-// Distance in cm, or 0 if no echo came back within the timeout
-long readDistanceCM(int trigPin, int echoPin)
+// Distance in cm as a float, or 0 if no echo came back within the 30 ms timeout (about 5 m)
+float readCM(int trigPin, int echoPin)
 {
   digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
@@ -648,11 +636,14 @@ long readDistanceCM(int trigPin, int echoPin)
   digitalWrite(trigPin, LOW);
 
   long duration = pulseIn(echoPin, HIGH, 30000UL);
-  return duration * 0.034 / 2;
+  return duration * 0.0343 / 2.0;
 }
 
 void rotateMotor(int rightMotorSpeed, int leftMotorSpeed)
 {
+  // Make the right motor a bit faster to cancel the drift to the right
+  rightMotorSpeed = constrain((long)rightMotorSpeed * (MOTOR_SPEED + RIGHT_MOTOR_TRIM) / MOTOR_SPEED, -255, 255);
+
   if (rightMotorSpeed < 0)
   {
     digitalWrite(rightMotorPin1, LOW);
